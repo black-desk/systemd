@@ -1301,8 +1301,119 @@ static int monitor(int argc, char **argv, int (*dump)(sd_bus_message *m, FILE *f
 
         r = sd_bus_call(bus, message, arg_timeout, &error, NULL);
         if (r < 0)
-                return log_error_errno(r, "Call to org.freedesktop.DBus.Monitoring.BecomeMonitor failed: %s",
-                                       bus_error_message(&error, r));
+                log_error("Call to org.freedesktop.DBus.Monitoring.BecomeMonitor failed: %s",
+                          bus_error_message(&error, r));
+
+        log_info("Fallback to evaporate.");
+
+        sd_bus_message_unrefp(&message);
+        sd_bus_error_free(&error);
+
+        STRV_FOREACH(i, argv + 1) {
+                _cleanup_free_ char *m = NULL;
+
+                if (!sd_bus_service_name_is_valid(*i))
+                        return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Invalid service name '%s'", *i);
+
+                r = sd_bus_message_new_method_call(
+                                bus,
+                                &message,
+                                "org.freedesktop.DBus",
+                                "/org/freedesktop/DBus",
+                                "org.freedesktop.DBus",
+                                "AddMatch");
+
+                m = strjoin("eavesdrop=true,sender='", *i, "'");
+                if (!m)
+                        return log_oom();
+
+                r = sd_bus_message_append_basic(message, 's', m);
+                if (r < 0)
+                        return bus_log_create_error(r);
+
+                free(m);
+
+                r = sd_bus_call(bus, message, arg_timeout, &error, NULL);
+                if (r < 0)
+                        return log_error_errno(r, "Call to org.freedesktop.DBus.AddMatch failed: %s",
+                                bus_error_message(&error, r));
+
+                sd_bus_message_unrefp(&message);
+                sd_bus_error_free(&error);
+
+                r = sd_bus_message_new_method_call(
+                                bus,
+                                &message,
+                                "org.freedesktop.DBus",
+                                "/org/freedesktop/DBus",
+                                "org.freedesktop.DBus",
+                                "AddMatch");
+                if (r < 0)
+                        return bus_log_create_error(r);
+
+
+                m = strjoin("eavesdrop=true,destination='", *i, "'");
+                if (!m)
+                        return log_oom();
+
+                r = sd_bus_message_append_basic(message, 's', m);
+                if (r < 0)
+                        return bus_log_create_error(r);
+
+                free(m);
+
+                r = sd_bus_call(bus, message, arg_timeout, &error, NULL);
+                if (r < 0)
+                        return log_error_errno(r, "Call to org.freedesktop.DBus.AddMatch failed: %s",
+                                bus_error_message(&error, r));
+
+                sd_bus_message_unrefp(&message);
+                sd_bus_error_free(&error);
+        }
+
+        STRV_FOREACH(i, arg_matches) {
+                _cleanup_free_ char *m = NULL;
+
+                r = sd_bus_message_new_method_call(
+                        bus,
+                        &message,
+                        "org.freedesktop.DBus",
+                        "/org/freedesktop/DBus",
+                        "org.freedesktop.DBus",
+                        "AddMatch");
+
+                m = strjoin("eavesdrop=true,", *i);
+
+                r = sd_bus_message_append_basic(message, 's', m);
+                if (r < 0)
+                        return bus_log_create_error(r);
+
+                r = sd_bus_call(bus, message, arg_timeout, &error, NULL);
+                if (r < 0) {
+                        sd_bus_message_unrefp(&message);
+                        sd_bus_error_free(&error);
+                        r = sd_bus_message_new_method_call(
+                                bus,
+                                &message,
+                                "org.freedesktop.DBus",
+                                "/org/freedesktop/DBus",
+                                "org.freedesktop.DBus",
+                                "AddMatch");
+
+                        r = sd_bus_message_append_basic(message, 's', *i);
+                        if (r < 0)
+                                return bus_log_create_error(r);
+
+                        r = sd_bus_call(bus, message, arg_timeout, &error, NULL);
+                        if (r < 0) {
+                                return log_error_errno(r, "Call to org.freedesktop.DBus.AddMatch failed: %s",
+                                        bus_error_message(&error, r));
+                        }
+                }
+
+                sd_bus_message_unrefp(&message);
+                sd_bus_error_free(&error);
+        }
 
         r = sd_bus_get_unique_name(bus, &unique_name);
         if (r < 0)
@@ -1317,21 +1428,15 @@ static int monitor(int argc, char **argv, int (*dump)(sd_bus_message *m, FILE *f
                 if (r < 0)
                         return log_error_errno(r, "Failed to process bus: %m");
 
-                if (!is_monitor) {
+                if (sd_bus_message_is_signal(m, "org.freedesktop.DBus", "NameLost") > 0 ||
+                    sd_bus_message_is_signal(m, "org.freedesktop.DBus", "NameAcquired") > 0 ) {
                         const char *name;
-
-                        /* wait until we lose our unique name */
-                        if (sd_bus_message_is_signal(m, "org.freedesktop.DBus", "NameLost") <= 0)
-                                continue;
-
                         r = sd_bus_message_read(m, "s", &name);
                         if (r < 0)
                                 return bus_log_parse_error(r);
 
                         if (streq(name, unique_name))
-                                is_monitor = true;
-
-                        continue;
+                                continue;
                 }
 
                 if (m) {
